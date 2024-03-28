@@ -157,6 +157,21 @@ defmodule TeslaMate.Vehicles.VehicleSyncTest do
                "longitude" => 41.128817
              }
 
+      # Published as nil
+      for key <- [
+            :active_route_destination,
+            :active_route_longitude,
+            :active_route_latitude,
+            :active_route_energy_at_arrival,
+            :active_route_miles_to_arrival,
+            :active_route_minutes_to_arrival,
+            :active_route_traffic_minutes_delay,
+            :active_route_location
+          ] do
+        topic = "teslamate/cars/#{car.id}/#{key}"
+        assert_receive {MqttPublisherMock, {:publish, ^topic, "nil", [retain: true, qos: 1]}}
+      end
+
       refute_receive _
     end
   end

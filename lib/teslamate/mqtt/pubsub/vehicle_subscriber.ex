@@ -6,10 +6,9 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
 
   alias TeslaMate.Mqtt.Publisher
   alias TeslaMate.Vehicles.Vehicle.Summary
-  alias TeslaMate.Locations.GeoFence
   alias TeslaMate.Vehicles
 
-  defstruct [:car_id, :last_summary, :deps, :namespace]
+  defstruct [:car_id, :last_values, :deps, :namespace]
   alias __MODULE__, as: State
 
   def child_spec(arg) do
@@ -38,28 +37,34 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
     {:ok, %State{car_id: car_id, namespace: namespace, deps: deps}}
   end
 
-  @impl true
-  def handle_info(summary, %State{last_summary: summary} = state) do
-    {:noreply, state}
-  end
-
   @always_published ~w(charge_energy_added charger_actual_current charger_phases
                        charger_power charger_voltage scheduled_charging_start_time
                        time_to_full_charge shift_state geofence trim_badging)a
 
+  @impl true
   def handle_info(%Summary{} = summary, state) do
-    summary
-    |> Map.from_struct()
-    |> Map.drop([:car])
+    values =
+      summary
+      |> Map.from_struct()
+      |> Map.drop([:car])
+      |> add_car_latitude_longitude(summary)
+      |> add_geofence(summary)
+      |> add_active_route(summary)
+
+    publish_values(values, state)
+    {:noreply, %State{state | last_values: values}}
+  end
+
+  defp publish_values(values, %State{last_values: values}) do
+    nil
+  end
+
+  defp publish_values(values, state) do
+    values
     |> Stream.reject(&match?({_key, :unknown}, &1))
     |> Stream.filter(fn {key, value} ->
       (key in @always_published or value != nil) and
-        (state.last_summary == nil or Map.get(state.last_summary, key) != value)
-    end)
-    |> Stream.map(fn
-      {key = :geofence, %GeoFence{name: name}} -> {key, name}
-      {key = :geofence, nil} -> {key, Application.get_env(:teslamate, :default_geofence)}
-      {key, val} -> {key, val}
+        (state.last_values == nil or Map.get(state.last_values, key) != value)
     end)
     |> Task.async_stream(&publish(&1, state),
       max_concurrency: 10,
@@ -73,38 +78,80 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
       _ok ->
         nil
     end)
+  end
 
-    if state.last_summary == nil or
-         state.last_summary.latitude != summary.latitude or
-         state.last_summary.longitude != summary.longitude do
-      lat_lng =
-        case {summary.latitude, summary.longitude} do
-          {nil, _} -> nil
-          {_, nil} -> nil
-          {%Decimal{} = lat, %Decimal{} = lon} -> {Decimal.to_float(lat), Decimal.to_float(lon)}
-          {lat, lon} -> {lat, lon}
-        end
-
-      case lat_lng do
-        nil ->
-          nil
-
-        {lat, lon} ->
-          location =
-            %{
-              latitude: lat,
-              longitude: lon
-            }
-            |> Jason.encode!()
-
-          case publish({"location", location}, state) do
-            :ok -> nil
-            {:error, reason} -> Logger.warning("Failed to publish location: #{inspect(reason)}")
-          end
+  defp add_car_latitude_longitude(map, %Summary{} = summary) do
+    lat_lng =
+      case {summary.latitude, summary.longitude} do
+        {nil, _} -> nil
+        {_, nil} -> nil
+        {%Decimal{} = lat, %Decimal{} = lon} -> {Decimal.to_float(lat), Decimal.to_float(lon)}
+        {lat, lon} -> {lat, lon}
       end
-    end
 
-    {:noreply, %State{state | last_summary: summary}}
+    case lat_lng do
+      nil ->
+        map
+
+      {lat, lon} ->
+        location =
+          %{
+            latitude: lat,
+            longitude: lon
+          }
+          |> Jason.encode!()
+
+        Map.put(map, :location, location)
+    end
+  end
+
+  defp add_geofence(map, %Summary{} = summary) do
+    # This overwrites the existing geofence value in map.
+    case summary.geofence do
+      nil ->
+        Map.put(map, :geofence, Application.get_env(:teslamate, :default_geofence))
+
+      geofence ->
+        Map.put(map, :geofence, geofence.name)
+    end
+  end
+
+  defp add_active_route(map, %Summary{active_route_destination: nil}) do
+    # This overwrites the existing values in map.
+    Map.merge(
+      map,
+      %{
+        active_route_destination: "nil",
+        active_route_latitude: "nil",
+        active_route_longitude: "nil",
+        active_route_energy_at_arrival: "nil",
+        active_route_miles_to_arrival: "nil",
+        active_route_minutes_to_arrival: "nil",
+        active_route_traffic_minutes_delay: "nil",
+        active_route_location: "nil"
+      }
+    )
+  end
+
+  defp add_active_route(map, %Summary{} = summary) do
+    # This overwrites the existing values in map.
+    location =
+      %{
+        latitude: summary.active_route_latitude,
+        longitude: summary.active_route_longitude
+      }
+      |> Jason.encode!()
+
+    Map.merge(map, %{
+      active_route_destination: summary.active_route_destination,
+      active_route_latitude: summary.active_route_latitude,
+      active_route_longitude: summary.active_route_longitude,
+      active_route_energy_at_arrival: summary.active_route_energy_at_arrival,
+      active_route_miles_to_arrival: summary.active_route_miles_to_arrival,
+      active_route_minutes_to_arrival: summary.active_route_minutes_to_arrival,
+      active_route_traffic_minutes_delay: summary.active_route_traffic_minutes_delay,
+      active_route_location: location
+    })
   end
 
   defp publish({key, value}, %State{car_id: car_id, namespace: namespace, deps: deps}) do
