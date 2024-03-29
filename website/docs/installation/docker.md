@@ -19,6 +19,8 @@ This setup is recommended only if you are running TeslaMate **on your home netwo
 1. Create a file called `docker-compose.yml` with the following content:
 
    ```yml title="docker-compose.yml"
+   version: "3"
+   
    services:
      teslamate:
        image: teslamate/teslamate:latest
